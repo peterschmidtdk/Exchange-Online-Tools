@@ -1,22 +1,27 @@
 <#
 .SYNOPSIS
-  Mailbox SOA Manager Tool (GUI) for Exchange Online - Cloud-managed Exchange attributes (SOA) toggle.
+  Mailbox SOA Manager (GUI) for Exchange Online - Cloud-managed Exchange attributes (SOA) toggle.
 
 .DESCRIPTION
   In Exchange Hybrid environments, Microsoft introduced a per-mailbox switch to transfer the
   Source of Authority (SOA) for Exchange attributes from on-premises to Exchange Online.
 
   This tool provides a Windows GUI to:
+    - Connect to Exchange Online
     - Search for EXO mailboxes
+    - Show SOA indicator in list: "SOA (Exchange Attributes)" = Online / On-Prem / Unknown
     - View IsDirSynced + IsExchangeCloudManaged state
     - Enable cloud management (IsExchangeCloudManaged = $true)
     - Revert to on-premises management (IsExchangeCloudManaged = $false)
-    - Show SOA indicator in list: "SOA (Exchange Attributes)" = Online / On-Prem / Unknown
     - Export a small backup (JSON) of mailbox + user properties before reverting
+
+REFERENCE
+  Microsoft Learn:
+  https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-attributes-cloud-management
 
 IMPORTANT NOTES
   - This does NOT migrate mailboxes. It only changes where Exchange *attributes* are managed.
-  - After you set IsExchangeCloudManaged=$false, next sync cycle can overwrite cloud values
+  - After you set IsExchangeCloudManaged=$false, the next sync cycle may overwrite cloud values
     with on-prem values. Backup/export any needed cloud-only changes first.
 
 REQUIREMENTS
@@ -24,10 +29,10 @@ REQUIREMENTS
   - Module: ExchangeOnlineManagement
 
 AUTHOR
-  Peter Schmidt (msdigest.net)
+  Peter
 
 VERSION
-  1.1 (2026-01-04)
+  1.2 (2026-01-04)
 #>
 
 #region Safety / STA check
@@ -36,8 +41,8 @@ try {
     if ($apt -ne [System.Threading.ApartmentState]::STA) {
         Write-Warning "This GUI must run in STA mode. Start PowerShell with -STA and re-run."
         Write-Warning "Examples:"
-        Write-Warning "  Windows PowerShell: powershell.exe -STA -File .\SOA-MailboxTool-GUI.ps1"
-        Write-Warning "  PowerShell 7+:      pwsh.exe -STA -File .\SOA-MailboxTool-GUI.ps1"
+        Write-Warning "  Windows PowerShell: powershell.exe -STA -File .\MailboxSOAManager-GUI.ps1"
+        Write-Warning "  PowerShell 7+:      pwsh.exe -STA -File .\MailboxSOAManager-GUI.ps1"
         return
     }
 } catch {
@@ -46,9 +51,10 @@ try {
 #endregion
 
 #region Globals
+$Script:ToolName    = "Mailbox SOA Manager"
 $Script:LogDir      = Join-Path -Path (Get-Location) -ChildPath "Logs"
 $Script:ExportDir   = Join-Path -Path (Get-Location) -ChildPath "Exports"
-$Script:LogFile     = Join-Path -Path $Script:LogDir -ChildPath "SOA-MailboxTool.log"
+$Script:LogFile     = Join-Path -Path $Script:LogDir -ChildPath "MailboxSOAManager.log"
 $Script:IsConnected = $false
 
 New-Item -ItemType Directory -Path $Script:LogDir -Force | Out-Null
@@ -155,7 +161,6 @@ function Search-Mailboxes {
     $q = $QueryText.Trim()
     if ([string]::IsNullOrWhiteSpace($q)) { return @() }
 
-    # OPATH filter for performance (best effort)
     $filter = "DisplayName -like '*$q*' -or Alias -like '*$q*' -or PrimarySmtpAddress -like '*$q*'"
 
     $items = Get-Mailbox -ResultSize $Max -Filter $filter -ErrorAction Stop |
@@ -194,14 +199,12 @@ function Get-MailboxDetails {
 }
 
 function Export-MailboxBackup {
-    param(
-        [Parameter(Mandatory)][string]$Identity
-    )
+    param([Parameter(Mandatory)][string]$Identity)
 
     $details = Get-MailboxDetails -Identity $Identity
     $safeId  = ($details.Mailbox.PrimarySmtpAddress.ToString() -replace '[^a-zA-Z0-9\.\-_@]','_')
     $stamp   = Get-Date -Format "yyyyMMdd-HHmmss"
-    $path    = Join-Path $Script:ExportDir "$safeId-SOA-Backup-$stamp.json"
+    $path    = Join-Path $Script:ExportDir "$safeId-MailboxSOA-Backup-$stamp.json"
 
     $details | ConvertTo-Json -Depth 6 | Set-Content -Path $path -Encoding UTF8
     Write-Log "Exported backup for $Identity to $path" "INFO"
@@ -241,7 +244,7 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "SOA Mailbox Tool - Exchange Online (IsExchangeCloudManaged)"
+$form.Text = "$($Script:ToolName) - Exchange Online (IsExchangeCloudManaged)"
 $form.Size = New-Object System.Drawing.Size(980, 640)
 $form.StartPosition = "CenterScreen"
 
@@ -382,21 +385,21 @@ function Show-Details {
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("Mailbox:")
-    $lines.Add("  DisplayName              : $($mbx.DisplayName)")
-    $lines.Add("  PrimarySmtpAddress       : $($mbx.PrimarySmtpAddress)")
-    $lines.Add("  RecipientTypeDetails     : $($mbx.RecipientTypeDetails)")
-    $lines.Add("  IsDirSynced              : $($mbx.IsDirSynced)")
-    $lines.Add("  IsExchangeCloudManaged   : $($mbx.IsExchangeCloudManaged)")
+    $lines.Add("  DisplayName               : $($mbx.DisplayName)")
+    $lines.Add("  PrimarySmtpAddress        : $($mbx.PrimarySmtpAddress)")
+    $lines.Add("  RecipientTypeDetails      : $($mbx.RecipientTypeDetails)")
+    $lines.Add("  IsDirSynced               : $($mbx.IsDirSynced)")
+    $lines.Add("  IsExchangeCloudManaged    : $($mbx.IsExchangeCloudManaged)")
     $lines.Add("  SOA (Exchange Attributes) : $soa")
-    $lines.Add("  ExchangeGuid             : $($mbx.ExchangeGuid)")
-    $lines.Add("  ExternalDirectoryObjectId: $($mbx.ExternalDirectoryObjectId)")
+    $lines.Add("  ExchangeGuid              : $($mbx.ExchangeGuid)")
+    $lines.Add("  ExternalDirectoryObjectId : $($mbx.ExternalDirectoryObjectId)")
 
     if ($usr) {
         $lines.Add("")
         $lines.Add("User:")
-        $lines.Add("  UserPrincipalName        : $($usr.UserPrincipalName)")
-        $lines.Add("  ImmutableId              : $($usr.ImmutableId)")
-        $lines.Add("  WhenChangedUTC           : $($usr.WhenChangedUTC)")
+        $lines.Add("  UserPrincipalName         : $($usr.UserPrincipalName)")
+        $lines.Add("  ImmutableId               : $($usr.ImmutableId)")
+        $lines.Add("  WhenChangedUTC            : $($usr.WhenChangedUTC)")
     }
 
     $txtDetails.Lines = $lines.ToArray()
@@ -540,7 +543,6 @@ $btnEnableCloud.Add_Click({
             [System.Windows.Forms.MessageBoxIcon]::Information
         ) | Out-Null
         Show-Details -Identity $Script:SelectedIdentity
-        # refresh list row values
         $btnSearch.PerformClick()
     } catch {
         Write-Log "Enable cloud SOA failed: $($_.Exception.Message)" "ERROR"
@@ -588,7 +590,6 @@ $btnRevertOnPrem.Add_Click({
         ) | Out-Null
 
         Show-Details -Identity $Script:SelectedIdentity
-        # refresh list row values
         $btnSearch.PerformClick()
     } catch {
         Write-Log "Revert to on-prem SOA failed: $($_.Exception.Message)" "ERROR"
@@ -609,7 +610,7 @@ $form.Add_FormClosing({
 
 # Initialize UI
 Set-UiConnectedState -Connected $false
-Write-Log "SOA Mailbox Tool started." "INFO"
+Write-Log "$($Script:ToolName) started." "INFO"
 
 [System.Windows.Forms.Application]::Run($form)
 #endregion

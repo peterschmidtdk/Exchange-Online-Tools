@@ -7,11 +7,15 @@
     - Enable cloud management     : IsExchangeCloudManaged = $true
     - Revert to on-prem management: IsExchangeCloudManaged = $false
 
-  Browse/Search (v1.7):
+  Browse/Search (v1.8):
     - Load all mailboxes into local cache for fast browsing/search
     - Paging (Prev/Next + Page size + indicator)
-    - Search uses cached list if loaded (fast + reliable)
-    - FIX: Grid binding now uses BindingSource (prevents "X matches but rows not shown")
+    - Search uses cached list (reliable + fast)
+    - FIX: Load all mailboxes now uses a safe loader:
+        * Detects supported Get-EXOMailbox parameters for your module version
+        * Tries Get-EXOMailbox first
+        * Falls back automatically to Get-Mailbox -ResultSize Unlimited
+        * Logs detailed errors
 
 REFERENCE
   https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-attributes-cloud-management
@@ -27,10 +31,10 @@ REQUIREMENTS
   - Module: ExchangeOnlineManagement
 
 AUTHOR
-  Peter Schmidt (msdigest.net)
+  Peter Schmidt
 
 VERSION
-  1.7 (2026-01-04)
+  1.8 (2026-01-04)
 #>
 
 # --- Load WinForms early ---
@@ -181,6 +185,64 @@ function Text-Matches {
     if ($null -eq $Text) { return $false }
     $s = $Text.ToString()
     return ($s.IndexOf($Query, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function Get-AllMailboxesSafe {
+    if (-not $Script:IsConnected) { throw "Not connected to Exchange Online." }
+
+    $errors = New-Object System.Collections.Generic.List[string]
+
+    $exoCmd = Get-Command Get-EXOMailbox -ErrorAction SilentlyContinue
+    if ($exoCmd) {
+        try {
+            $splat = @{
+                ResultSize  = 'Unlimited'
+                ErrorAction = 'Stop'
+            }
+
+            if ($exoCmd.Parameters.ContainsKey('PropertySets')) {
+                $splat['PropertySets'] = 'Minimum'
+            }
+
+            if ($exoCmd.Parameters.ContainsKey('Properties')) {
+                $splat['Properties'] = @(
+                    'DisplayName','Alias','PrimarySmtpAddress',
+                    'RecipientTypeDetails','IsDirSynced','IsExchangeCloudManaged'
+                )
+            }
+
+            Write-Log "Get-AllMailboxesSafe: Trying Get-EXOMailbox with params: $($splat.Keys -join ',')" "INFO"
+            $raw = @(Get-EXOMailbox @splat)
+
+            if ($raw.Count -gt 0) {
+                Write-Log "Get-AllMailboxesSafe: Get-EXOMailbox returned $($raw.Count) objects." "INFO"
+                return $raw
+            } else {
+                $errors.Add("Get-EXOMailbox returned 0 objects.")
+            }
+        } catch {
+            $msg = "Get-EXOMailbox failed: $($_.Exception.Message)"
+            $errors.Add($msg)
+            Write-Log "Get-AllMailboxesSafe: $msg" "WARN"
+        }
+    } else {
+        $errors.Add("Get-EXOMailbox not available in this session/module.")
+        Write-Log "Get-AllMailboxesSafe: Get-EXOMailbox not available." "INFO"
+    }
+
+    try {
+        Write-Log "Get-AllMailboxesSafe: Falling back to Get-Mailbox -ResultSize Unlimited" "INFO"
+        $raw2 = @(Get-Mailbox -ResultSize Unlimited -ErrorAction Stop)
+        Write-Log "Get-AllMailboxesSafe: Get-Mailbox returned $($raw2.Count) objects." "INFO"
+        return $raw2
+    } catch {
+        $msg2 = "Get-Mailbox fallback failed: $($_.Exception.Message)"
+        $errors.Add($msg2)
+        Write-Log "Get-AllMailboxesSafe: $msg2" "ERROR"
+
+        $combined = ($errors | Select-Object -Unique) -join "`r`n- "
+        throw "Load all mailboxes failed.`r`n- $combined"
+    }
 }
 #endregion
 
@@ -484,7 +546,7 @@ try {
     $lblStatus.Location = New-Object System.Drawing.Point(16, 145)
     $lblStatus.Size = New-Object System.Drawing.Size(1020, 20)
 
-    # Grid + BindingSource FIX
+    # Grid + BindingSource
     $grid = New-Object System.Windows.Forms.DataGridView
     $grid.Location = New-Object System.Drawing.Point(16, 235)
     $grid.Size = New-Object System.Drawing.Size(1056, 220)
@@ -705,32 +767,26 @@ try {
             $lblStatus.Text = "Loading all mailboxes..."
             $form.Refresh()
 
-            Write-Log "LoadAll started." "INFO"
-            $mode = Get-MailboxCmdletMode
+            Write-Log "LoadAll clicked." "INFO"
 
-            if ($mode -eq "EXO") {
-                # Pull the exact properties we need for SOA/browsing
-                $raw = @(Get-EXOMailbox -ResultSize Unlimited -PropertySets Minimum -Properties IsDirSynced,IsExchangeCloudManaged,RecipientTypeDetails -ErrorAction Stop)
-            } else {
-                $raw = @(Get-Mailbox -ResultSize Unlimited -ErrorAction Stop)
-            }
-
+            $raw = Get-AllMailboxesSafe
             $Script:MailboxCache = @($raw | ForEach-Object { Convert-ToGridRow $_ })
             $Script:CacheLoaded = $true
 
             Reset-ViewToCache
             Bind-GridFromCurrentView
+            Reset-SelectionAndDetails
 
             $btnClearSearch.Enabled = $true
             $lblStatus.Text = "Loaded $($Script:MailboxCache.Count) mailboxes. Use paging + search."
-            Write-Log "LoadAll completed. Count=$($Script:MailboxCache.Count)" "INFO"
-            Reset-SelectionAndDetails
+            Write-Log "LoadAll success. CachedCount=$($Script:MailboxCache.Count)" "INFO"
         } catch {
             Write-Log "LoadAll failed: $($_.Exception.Message)" "ERROR"
-            $lblStatus.Text = "Load all failed: $($_.Exception.Message)"
+            $lblStatus.Text = "Load all failed. Check log for details."
+
             [System.Windows.Forms.MessageBox]::Show(
-                "Load all mailboxes failed.`n$($_.Exception.Message)",
-                "Error",
+                "Load all mailboxes failed.`n`n$($_.Exception.Message)`n`nLog:`n$($Script:LogFile)",
+                "Load all failed",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error
             ) | Out-Null
@@ -868,7 +924,6 @@ try {
             [System.Windows.Forms.MessageBox]::Show($msg,"Done",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
             Show-Details -Identity $Script:SelectedIdentity
 
-            # Update cache entry
             if ($Script:CacheLoaded) {
                 $updated = Convert-ToGridRow (Get-Mailbox -Identity $Script:SelectedIdentity -ErrorAction Stop)
                 for ($i=0; $i -lt $Script:MailboxCache.Count; $i++) {

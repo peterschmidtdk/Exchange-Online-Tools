@@ -42,8 +42,9 @@ AUTHOR
   Peter Schmidt (msdigest.net)
 
 VERSION
-  2.6.1 (2026-01-06)
+  2.6.2 (2026-01-06)
     - Add Mailbox Type filter dropdown: All/User/Shared/Room/Equipment/Other
+    - Rename button "Open log" -> "View logfile"
 #>
 
 #region PS7 Requirement
@@ -66,7 +67,7 @@ try {
 
 #region Globals
 $Script:ToolName      = "Mailbox SOA Manager"
-$Script:ScriptVersion = "2.6.1"
+$Script:ScriptVersion = "2.6.2"
 $Script:RunId         = [Guid]::NewGuid().ToString()
 
 $Script:LogDir   = Join-Path -Path (Get-Location) -ChildPath "Logs"
@@ -484,7 +485,7 @@ try {
     $lblConn.AutoSize = $true
 
     $btnOpenLog = New-Object System.Windows.Forms.Button
-    $btnOpenLog.Text = "Open log"
+    $btnOpenLog.Text = "View logfile"
     $btnOpenLog.Location = New-Object System.Drawing.Point(1040, 10)
     $btnOpenLog.Size = New-Object System.Drawing.Size(110, 30)
 
@@ -621,7 +622,6 @@ try {
 
     # Manual columns
     $grid.Columns.Clear() | Out-Null
-
     foreach ($col in @(
         @{Name="DisplayName"; Header="DisplayName"; Prop="DisplayName"},
         @{Name="PrimarySMTP"; Header="PrimarySMTP"; Prop="PrimarySMTP"},
@@ -690,8 +690,7 @@ try {
     $grid.DataSource = $PageBinding
 
     function Get-TotalPagesUI {
-        $totalPages = Get-TotalPages -Items $Script:CurrentView -PageSize $Script:PageSize
-        return $totalPages
+        return (Get-TotalPages -Items $Script:CurrentView -PageSize $Script:PageSize)
     }
 
     function Update-PagingUI {
@@ -782,7 +781,7 @@ try {
         } catch {
             [System.Windows.Forms.MessageBox]::Show(
                 "Failed to open log file.`n$($_.Exception.Message)`n`nPath:`n$($Script:LogFile)",
-                "Open log failed",
+                "View logfile failed",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error
             ) | Out-Null

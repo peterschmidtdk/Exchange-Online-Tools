@@ -8,9 +8,10 @@
     - Revert to on-prem management: Set-Mailbox -IsExchangeCloudManaged $false
 
   Browse/Search:
+    - Connect/Disconnect to Exchange Online
     - Load all mailboxes into local cache (required for fast browsing/search)
     - Paging (Prev/Next + Page size)
-    - Search uses cached list (reliable + fast)
+    - Search uses cached list
 
   Grid Columns:
     - DisplayName
@@ -32,13 +33,13 @@ REQUIREMENTS
   - Module: ExchangeOnlineManagement
 
 AUTHOR
-  Peter Schmidt (msdigest.net)
+  Peter Schmidt (www.msdigest.net)
 
 VERSION
-  2.5.7 (2026-01-06)
-    - Fix grid load: use BindingList + manual DataGridView columns (avoid “property with spaces” + DataTable binding issues)
+  2.5.8 (2026-01-06)
+    - Fix: Use strongly-typed BindingList rows (MailboxGridRow) so grid text renders correctly
+    - Ensure readable grid colors for all themes
     - Keep "${Context}:" parsing fix for Write-LogException
-    - Add bind diagnostics (items count, grid rows)
 #>
 
 #region PS7 Requirement
@@ -61,7 +62,7 @@ try {
 
 #region Globals
 $Script:ToolName      = "Mailbox SOA Manager"
-$Script:ScriptVersion = "2.5.7"
+$Script:ScriptVersion = "2.5.8"
 $Script:RunId         = [Guid]::NewGuid().ToString()
 
 $Script:LogDir   = Join-Path -Path (Get-Location) -ChildPath "Logs"
@@ -72,13 +73,29 @@ $Script:IsConnected = $false
 $Script:ExoActor    = $null
 $Script:TenantName  = $null
 
-$Script:MailboxCache     = @()  # full cached list (PSCustomObject rows)
-$Script:CurrentView      = @()  # current filtered list
+$Script:MailboxCache     = @()  # full cached list (MailboxGridRow)
+$Script:CurrentView      = @()  # current filtered list (MailboxGridRow)
 $Script:CacheLoaded      = $false
 $Script:PageSize         = 50
 $Script:PageIndex        = 0
 $Script:CurrentQueryText = ""
 $Script:SelectedIdentity = $null
+#endregion
+
+#region Types (Strong binding for WinForms)
+class MailboxGridRow {
+    [string]$DisplayName
+    [string]$PrimarySMTP
+    [string]$SOAStatus
+    [string]$DirSynced
+
+    MailboxGridRow([string]$displayName, [string]$primarySmtp, [string]$soaStatus, [string]$dirSynced) {
+        $this.DisplayName = $displayName
+        $this.PrimarySMTP = $primarySmtp
+        $this.SOAStatus   = $soaStatus
+        $this.DirSynced   = $dirSynced
+    }
+}
 #endregion
 
 #region Logging
@@ -227,19 +244,17 @@ function Get-AllMailboxesSafe {
     return $raw
 }
 
-# IMPORTANT: Use SOAStatus (no space) for binding reliability.
 function Convert-ToRow {
     param([Parameter(Mandatory)]$MailboxObject)
 
     $smtp = ""
     if ($MailboxObject.PrimarySmtpAddress) { $smtp = [string]$MailboxObject.PrimarySmtpAddress }
 
-    [PSCustomObject]@{
-        DisplayName = [string]$MailboxObject.DisplayName
-        PrimarySMTP = $smtp
-        SOAStatus   = (Get-SOAStatus $MailboxObject.IsExchangeCloudManaged)
-        DirSynced   = if ($null -eq $MailboxObject.IsDirSynced) { "" } else { [string]$MailboxObject.IsDirSynced }
-    }
+    $dn  = [string]$MailboxObject.DisplayName
+    $soa = (Get-SOAStatus $MailboxObject.IsExchangeCloudManaged)
+    $ds  = if ($null -eq $MailboxObject.IsDirSynced) { "" } else { [string]$MailboxObject.IsDirSynced }
+
+    return [MailboxGridRow]::new($dn, $smtp, $soa, $ds)
 }
 #endregion
 
@@ -525,27 +540,40 @@ try {
     $grid.MultiSelect = $false
     $grid.AutoGenerateColumns = $false
     $grid.AutoSizeColumnsMode = "Fill"
+    $grid.RowHeadersVisible = $false
+
+    # Ensure text is visible in all themes
+    $grid.BackgroundColor = [System.Drawing.SystemColors]::Window
+    $grid.DefaultCellStyle.BackColor = [System.Drawing.SystemColors]::Window
+    $grid.DefaultCellStyle.ForeColor = [System.Drawing.SystemColors]::WindowText
+    $grid.DefaultCellStyle.SelectionBackColor = [System.Drawing.SystemColors]::Highlight
+    $grid.DefaultCellStyle.SelectionForeColor = [System.Drawing.SystemColors]::HighlightText
+
     $gridPanel.Controls.Add($grid,0,0)
 
-    # Manual columns (headers as requested)
+    # Manual columns (with Name for Cells["..."] access)
     $grid.Columns.Clear() | Out-Null
 
     $col1 = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $col1.Name = "DisplayName"
     $col1.HeaderText = "DisplayName"
     $col1.DataPropertyName = "DisplayName"
     $grid.Columns.Add($col1) | Out-Null
 
     $col2 = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $col2.Name = "PrimarySMTP"
     $col2.HeaderText = "PrimarySMTP"
     $col2.DataPropertyName = "PrimarySMTP"
     $grid.Columns.Add($col2) | Out-Null
 
     $col3 = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $col3.Name = "SOAStatus"
     $col3.HeaderText = "SOA Status"
     $col3.DataPropertyName = "SOAStatus"
     $grid.Columns.Add($col3) | Out-Null
 
     $col4 = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $col4.Name = "DirSynced"
     $col4.HeaderText = "DirSynced"
     $col4.DataPropertyName = "DirSynced"
     $grid.Columns.Add($col4) | Out-Null
@@ -582,8 +610,8 @@ try {
     $footer.Text = "v$($Script:ScriptVersion) | Toggle mailbox SOA (IsExchangeCloudManaged) | Log: $($Script:LogFile)"
     $root.Controls.Add($footer,0,3)
 
-    # BindingList for page view
-    $PageBinding = New-Object System.ComponentModel.BindingList[object]
+    # Strongly-typed BindingList for page view
+    $PageBinding = [System.ComponentModel.BindingList[MailboxGridRow]]::new()
     $grid.DataSource = $PageBinding
 
     function Update-PagingUI {

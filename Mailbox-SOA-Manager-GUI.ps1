@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Mailbox SOA Manager (GUI) for Exchange Online - Cloud-managed Exchange attributes (SOA) toggle.
+  Exchange Mailbox SOA Manager (GUI) for Exchange Online - Cloud-managed Exchange attributes (SOA) toggle.
 
 .DESCRIPTION
   GUI tool to view and change mailbox Exchange attribute SOA state via IsExchangeCloudManaged:
@@ -12,12 +12,16 @@
     - Load all mailboxes into local cache (required for fast browsing/search)
     - Paging (Prev/Next + Page size)
     - Search uses cached list
+    - Filter by SOA Status: All / Online / On-Prem
 
   Grid Columns:
     - DisplayName
     - PrimarySMTP
     - SOA Status (Online / On-Prem / Unknown)
     - DirSynced
+
+  UI Enhancement:
+    - Rows with SOA Status = Online are highlighted light green (when not selected)
 
 REFERENCE
   https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-attributes-cloud-management
@@ -36,10 +40,9 @@ AUTHOR
   Peter Schmidt (www.msdigest.net)
 
 VERSION
-  2.5.8 (2026-01-06)
-    - Fix: Use strongly-typed BindingList rows (MailboxGridRow) so grid text renders correctly
-    - Ensure readable grid colors for all themes
-    - Keep "${Context}:" parsing fix for Write-LogException
+  2.5.9 (2026-01-06)
+    - Add SOA filter dropdown: All / Online / On-Prem (default All)
+    - Highlight rows with SOAStatus=Online in light green
 #>
 
 #region PS7 Requirement
@@ -61,8 +64,8 @@ try {
 #endregion
 
 #region Globals
-$Script:ToolName      = "Mailbox SOA Manager"
-$Script:ScriptVersion = "2.5.8"
+$Script:ToolName      = "Exchange Mailbox SOA Manager"
+$Script:ScriptVersion = "2.5.9"
 $Script:RunId         = [Guid]::NewGuid().ToString()
 
 $Script:LogDir   = Join-Path -Path (Get-Location) -ChildPath "Logs"
@@ -79,6 +82,7 @@ $Script:CacheLoaded      = $false
 $Script:PageSize         = 50
 $Script:PageIndex        = 0
 $Script:CurrentQueryText = ""
+$Script:CurrentFilter    = "All"  # All | Online | On-Prem
 $Script:SelectedIdentity = $null
 #endregion
 
@@ -301,33 +305,50 @@ function Set-MailboxSOACloudManaged {
 }
 #endregion
 
-#region Paging
+#region Paging + filter/search
 function Reset-ViewToCache {
     $Script:CurrentView = @($Script:MailboxCache)
     $Script:PageIndex = 0
     $Script:CurrentQueryText = ""
+    $Script:CurrentFilter = "All"
 }
 
-function Apply-SearchToCache {
-    param([string]$QueryText)
+function Apply-SearchAndFilterToCache {
+    param(
+        [string]$QueryText,
+        [string]$Filter
+    )
 
     $q = ""
     if ($null -ne $QueryText) { $q = $QueryText.Trim() }
 
-    $Script:CurrentQueryText = $q
-    $Script:PageIndex = 0
+    $f = "All"
+    if ($null -ne $Filter -and -not [string]::IsNullOrWhiteSpace($Filter)) { $f = $Filter.Trim() }
 
-    if ([string]::IsNullOrWhiteSpace($q)) {
-        $Script:CurrentView = @($Script:MailboxCache)
-        return
+    $Script:CurrentQueryText = $q
+    $Script:CurrentFilter    = $f
+    $Script:PageIndex        = 0
+
+    $items = @($Script:MailboxCache)
+
+    # Filter first
+    switch ($f) {
+        "Online"  { $items = @($items | Where-Object { $_.SOAStatus -eq "Online" }) }
+        "On-Prem" { $items = @($items | Where-Object { $_.SOAStatus -eq "On-Prem" }) }
+        default   { } # All
     }
 
-    $Script:CurrentView = @(
-        $Script:MailboxCache | Where-Object {
-            (Text-Matches $_.DisplayName $q) -or
-            (Text-Matches $_.PrimarySMTP $q)
-        }
-    )
+    # Then search
+    if (-not [string]::IsNullOrWhiteSpace($q)) {
+        $items = @(
+            $items | Where-Object {
+                (Text-Matches $_.DisplayName $q) -or
+                (Text-Matches $_.PrimarySMTP $q)
+            }
+        )
+    }
+
+    $Script:CurrentView = $items
 }
 
 function Get-PageSlice {
@@ -400,6 +421,7 @@ function Disconnect-EXO {
         $Script:CacheLoaded      = $false
         $Script:PageIndex        = 0
         $Script:CurrentQueryText = ""
+        $Script:CurrentFilter    = "All"
         $Script:SelectedIdentity = $null
     }
 }
@@ -443,7 +465,7 @@ try {
     $lblConn.AutoSize = $true
 
     $btnOpenLog = New-Object System.Windows.Forms.Button
-    $btnOpenLog.Text = "Open log"
+    $btnOpenLog.Text = "View Logfile"
     $btnOpenLog.Location = New-Object System.Drawing.Point(960, 10)
     $btnOpenLog.Size = New-Object System.Drawing.Size(110, 30)
 
@@ -459,22 +481,6 @@ try {
     $btnLoadAll.Location = New-Object System.Drawing.Point(12, 10)
     $btnLoadAll.Size = New-Object System.Drawing.Size(220, 30)
     $btnLoadAll.Enabled = $false
-
-    $txtSearch = New-Object System.Windows.Forms.TextBox
-    $txtSearch.Location = New-Object System.Drawing.Point(12, 50)
-    $txtSearch.Size = New-Object System.Drawing.Size(520, 25)
-
-    $btnSearch = New-Object System.Windows.Forms.Button
-    $btnSearch.Text = "Search (cache)"
-    $btnSearch.Location = New-Object System.Drawing.Point(540, 48)
-    $btnSearch.Size = New-Object System.Drawing.Size(120, 30)
-    $btnSearch.Enabled = $false
-
-    $btnClear = New-Object System.Windows.Forms.Button
-    $btnClear.Text = "Clear"
-    $btnClear.Location = New-Object System.Drawing.Point(668, 48)
-    $btnClear.Size = New-Object System.Drawing.Size(90, 30)
-    $btnClear.Enabled = $false
 
     $btnPrev = New-Object System.Windows.Forms.Button
     $btnPrev.Text = "◀ Prev"
@@ -506,10 +512,39 @@ try {
     $cmbPageSize.SelectedItem = "50"
     $cmbPageSize.Enabled = $false
 
+    $lblFilter = New-Object System.Windows.Forms.Label
+    $lblFilter.Text = "SOA Filter:"
+    $lblFilter.Location = New-Object System.Drawing.Point(740, 16)
+    $lblFilter.AutoSize = $true
+
+    $cmbFilter = New-Object System.Windows.Forms.ComboBox
+    $cmbFilter.Location = New-Object System.Drawing.Point(810, 12)
+    $cmbFilter.Size = New-Object System.Drawing.Size(110, 25)
+    $cmbFilter.DropDownStyle = 'DropDownList'
+    [void]$cmbFilter.Items.AddRange(@("All","Online","On-Prem"))
+    $cmbFilter.SelectedItem = "All"
+    $cmbFilter.Enabled = $false
+
     $lblCount = New-Object System.Windows.Forms.Label
     $lblCount.Text = "Count: -"
-    $lblCount.Location = New-Object System.Drawing.Point(740, 16)
+    $lblCount.Location = New-Object System.Drawing.Point(940, 16)
     $lblCount.AutoSize = $true
+
+    $txtSearch = New-Object System.Windows.Forms.TextBox
+    $txtSearch.Location = New-Object System.Drawing.Point(12, 50)
+    $txtSearch.Size = New-Object System.Drawing.Size(520, 25)
+
+    $btnSearch = New-Object System.Windows.Forms.Button
+    $btnSearch.Text = "Search (cache)"
+    $btnSearch.Location = New-Object System.Drawing.Point(540, 48)
+    $btnSearch.Size = New-Object System.Drawing.Size(120, 30)
+    $btnSearch.Enabled = $false
+
+    $btnClear = New-Object System.Windows.Forms.Button
+    $btnClear.Text = "Clear"
+    $btnClear.Location = New-Object System.Drawing.Point(668, 48)
+    $btnClear.Size = New-Object System.Drawing.Size(90, 30)
+    $btnClear.Enabled = $false
 
     $lblStatus = New-Object System.Windows.Forms.Label
     $lblStatus.Text = ""
@@ -517,7 +552,8 @@ try {
     $lblStatus.Size = New-Object System.Drawing.Size(290, 20)
 
     $browse.Controls.AddRange(@(
-        $btnLoadAll,$btnPrev,$btnNext,$lblPage,$lblPageSize,$cmbPageSize,$lblCount,
+        $btnLoadAll,$btnPrev,$btnNext,$lblPage,$lblPageSize,$cmbPageSize,
+        $lblFilter,$cmbFilter,$lblCount,
         $txtSearch,$btnSearch,$btnClear,$lblStatus
     ))
     $root.Controls.Add($browse,0,1)
@@ -577,6 +613,28 @@ try {
     $col4.HeaderText = "DirSynced"
     $col4.DataPropertyName = "DirSynced"
     $grid.Columns.Add($col4) | Out-Null
+
+    # Row highlight (Online = light green)
+    $OnlineRowColor = [System.Drawing.Color]::PaleGreen
+    $DefaultRowColor = [System.Drawing.SystemColors]::Window
+
+    $grid.Add_RowPrePaint({
+        param($sender,$e)
+        try {
+            $row = $sender.Rows[$e.RowIndex]
+            if ($null -eq $row -or $row.IsNewRow) { return }
+
+            # Keep default selection styling when selected
+            if ($row.Selected) { return }
+
+            $soa = $row.Cells["SOAStatus"].Value
+            if ($soa -eq "Online") {
+                $row.DefaultCellStyle.BackColor = $OnlineRowColor
+            } else {
+                $row.DefaultCellStyle.BackColor = $DefaultRowColor
+            }
+        } catch { }
+    })
 
     $actions = New-Object System.Windows.Forms.Panel
     $actions.Dock = 'Fill'
@@ -647,7 +705,7 @@ try {
         $grid.Refresh()
         Update-PagingUI
 
-        Write-Log "Grid bind diagnostics: PageItems=$($pageItems.Count) BindingCount=$($PageBinding.Count) GridRows=$($grid.Rows.Count)" "INFO"
+        Write-Log "Grid bind diagnostics: Filter='$($Script:CurrentFilter)' Query='$($Script:CurrentQueryText)' PageItems=$($pageItems.Count) BindingCount=$($PageBinding.Count) GridRows=$($grid.Rows.Count)" "INFO"
     }
 
     function Reset-Selection {
@@ -665,6 +723,7 @@ try {
         $btnLoadAll.Enabled      = $Connected
         $btnSearch.Enabled       = $Connected
         $cmbPageSize.Enabled     = $Connected
+        $cmbFilter.Enabled       = $Connected
 
         if (-not $Connected) {
             $lblConn.Text = "Status: Not connected"
@@ -675,12 +734,21 @@ try {
             $btnPrev.Enabled = $false
             $btnNext.Enabled = $false
             $btnClear.Enabled = $false
+            $cmbFilter.SelectedItem = "All"
             Reset-Selection
         } else {
             $tn = if ($Script:TenantName) { $Script:TenantName } else { "Unknown" }
             $lblConn.Text = "Status: Connected to Exchange Online (Tenant: $tn)"
             $lblStatus.Text = "Connected"
         }
+    }
+
+    function Rebuild-ViewAndBind {
+        if (-not $Script:CacheLoaded) { return }
+        $filter = if ($cmbFilter.SelectedItem) { [string]$cmbFilter.SelectedItem } else { "All" }
+        Apply-SearchAndFilterToCache -QueryText $txtSearch.Text -Filter $filter
+        Bind-GridFromCurrentView
+        Reset-Selection
     }
 
     # Events
@@ -725,6 +793,14 @@ try {
         } catch { }
     })
 
+    $cmbFilter.Add_SelectedIndexChanged({
+        try {
+            $sel = if ($cmbFilter.SelectedItem) { [string]$cmbFilter.SelectedItem } else { "All" }
+            Write-Log "SOA Filter changed to '$sel'" "INFO"
+            Rebuild-ViewAndBind
+        } catch { }
+    })
+
     $btnPrev.Add_Click({
         if ($Script:PageIndex -gt 0) {
             $Script:PageIndex--
@@ -760,7 +836,9 @@ try {
             $Script:MailboxCache = @($cache)
             $Script:CacheLoaded  = $true
 
-            Reset-ViewToCache
+            # Apply default filter/search (All, no query)
+            $cmbFilter.SelectedItem = "All"
+            Apply-SearchAndFilterToCache -QueryText "" -Filter "All"
             Bind-GridFromCurrentView
             Reset-Selection
 
@@ -787,7 +865,8 @@ try {
         if (-not $Script:IsConnected) { return }
 
         $qTrim = if ($txtSearch.Text) { $txtSearch.Text.Trim() } else { "" }
-        Write-Log "Search clicked. Query='$qTrim' CacheLoaded=$($Script:CacheLoaded)" "INFO"
+        $fSel  = if ($cmbFilter.SelectedItem) { [string]$cmbFilter.SelectedItem } else { "All" }
+        Write-Log "Search clicked. Query='$qTrim' Filter='$fSel' CacheLoaded=$($Script:CacheLoaded)" "INFO"
 
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
         try {
@@ -801,7 +880,7 @@ try {
                 return
             }
 
-            Apply-SearchToCache -QueryText $qTrim
+            Apply-SearchAndFilterToCache -QueryText $qTrim -Filter $fSel
             Bind-GridFromCurrentView
             Reset-Selection
 
@@ -821,8 +900,9 @@ try {
 
     $btnClear.Add_Click({
         $txtSearch.Text = ""
+        $cmbFilter.SelectedItem = "All"
         if ($Script:CacheLoaded) {
-            Reset-ViewToCache
+            Apply-SearchAndFilterToCache -QueryText "" -Filter "All"
             Bind-GridFromCurrentView
             Reset-Selection
             $lblStatus.Text = "Showing all"
@@ -860,8 +940,7 @@ try {
                 }
             }
 
-            Apply-SearchToCache -QueryText $txtSearch.Text
-            Bind-GridFromCurrentView
+            Rebuild-ViewAndBind
             Write-Log "Refresh selected completed for '$($Script:SelectedIdentity)'" "INFO"
         } catch {
             Write-LogException -ErrorRecord $_ -Context "Refresh selected failed"

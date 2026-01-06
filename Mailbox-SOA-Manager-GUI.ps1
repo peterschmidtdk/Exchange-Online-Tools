@@ -35,10 +35,10 @@ AUTHOR
   Peter
 
 VERSION
-  2.5.5 (2026-01-05)
-    - Restore full GUI event handlers (Connect/Open log/LoadAll/Search/etc.)
+  2.5.6 (2026-01-05)
+    - Fix: Bind DataTable directly to DataGridView (avoid BindingSource refresh/bind issues)
+    - Add bind diagnostics: cache count, dt rows, grid rows
     - Keep parsing fix: "${Context}:" in Write-LogException
-    - Keep binding-guard to avoid null binding crashes
 #>
 
 #region PS7 Requirement
@@ -62,7 +62,7 @@ try {
 
 #region Globals
 $Script:ToolName      = "Mailbox SOA Manager"
-$Script:ScriptVersion = "2.5.5"
+$Script:ScriptVersion = "2.5.6"
 $Script:RunId         = [Guid]::NewGuid().ToString()
 
 $Script:LogDir   = Join-Path -Path (Get-Location) -ChildPath "Logs"
@@ -82,10 +82,6 @@ $Script:PageIndex        = 0
 $Script:CurrentQueryText = ""
 
 $Script:SelectedIdentity = $null
-
-# GUI globals (critical for binding stability)
-$Script:GridControl = $null
-$Script:GridBinding = $null
 #endregion
 
 #region Logging
@@ -205,8 +201,7 @@ function Get-ExoActorBestEffort {
         if ($ci) {
             $info = Get-ConnectionInformation -ErrorAction Stop | Select-Object -First 1
             if ($info -and $info.UserPrincipalName) {
-                $u = [string]$info.UserPrincipalName
-                $u = $u.Trim().TrimEnd(';')
+                $u = ([string]$info.UserPrincipalName).Trim().TrimEnd(';')
                 return "EXO:$u"
             }
         }
@@ -218,8 +213,7 @@ function Get-TenantNameBestEffort {
     try {
         $org = Get-OrganizationConfig -ErrorAction Stop | Select-Object -First 1
         if ($org -and $org.Name) {
-            $n = [string]$org.Name
-            return $n.Trim().TrimEnd(';')
+            return ([string]$org.Name).Trim().TrimEnd(';')
         }
     } catch { }
 
@@ -233,23 +227,13 @@ function Get-TenantNameBestEffort {
     return "Unknown"
 }
 
-function Ensure-GridBindingReady {
-    if ($null -eq $Script:GridBinding) {
-        Write-Log "GridBinding was null. Recreating BindingSource." "WARN"
-        $Script:GridBinding = New-Object System.Windows.Forms.BindingSource
-        if ($Script:GridControl) {
-            $Script:GridControl.DataSource = $Script:GridBinding
-        }
-    }
-}
-
 function Get-AllMailboxesSafe {
     if (-not $Script:IsConnected) { throw "Not connected to Exchange Online." }
-
-    # IMPORTANT: IsExchangeCloudManaged is NOT available via Get-EXOMailbox in many tenants.
-    # Therefore we load with Get-Mailbox which provides the property.
     Write-Log "Get-AllMailboxesSafe: Using Get-Mailbox -ResultSize Unlimited" "INFO"
-    $raw = @(Get-Mailbox -ResultSize Unlimited -ErrorAction Stop | Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged)
+
+    $raw = @(Get-Mailbox -ResultSize Unlimited -ErrorAction Stop |
+        Select-Object DisplayName,PrimarySmtpAddress,IsDirSynced,IsExchangeCloudManaged)
+
     Write-Log "Get-AllMailboxesSafe: Get-Mailbox returned count=$($raw.Count)" "INFO"
     return $raw
 }
@@ -446,13 +430,11 @@ function Disconnect-EXO {
 
 #region GUI
 try {
-    # --- Main form ---
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "$($Script:ToolName) v$($Script:ScriptVersion)"
     $form.Size = New-Object System.Drawing.Size(1100, 700)
     $form.StartPosition = "CenterScreen"
 
-    # --- Layout root ---
     $root = New-Object System.Windows.Forms.TableLayoutPanel
     $root.Dock = 'Fill'
     $root.RowCount = 4
@@ -463,7 +445,7 @@ try {
     $root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 32))) | Out-Null
     $form.Controls.Add($root)
 
-    # --- Top bar ---
+    # Top bar
     $top = New-Object System.Windows.Forms.Panel
     $top.Dock = 'Fill'
 
@@ -491,7 +473,7 @@ try {
     $top.Controls.AddRange(@($btnConnect,$btnDisconnect,$lblConn,$btnOpenLog))
     $root.Controls.Add($top,0,0)
 
-    # --- Browse panel ---
+    # Browse panel
     $browse = New-Object System.Windows.Forms.Panel
     $browse.Dock = 'Fill'
 
@@ -563,7 +545,7 @@ try {
     ))
     $root.Controls.Add($browse,0,1)
 
-    # --- Grid area (with actions bar) ---
+    # Grid area
     $gridPanel = New-Object System.Windows.Forms.TableLayoutPanel
     $gridPanel.Dock = 'Fill'
     $gridPanel.RowCount = 2
@@ -581,11 +563,6 @@ try {
     $grid.MultiSelect = $false
     $grid.AutoSizeColumnsMode = "Fill"
     $grid.AutoGenerateColumns = $true
-
-    $Script:GridControl = $grid
-    $Script:GridBinding = New-Object System.Windows.Forms.BindingSource
-    $grid.DataSource = $Script:GridBinding
-
     $gridPanel.Controls.Add($grid,0,0)
 
     $actions = New-Object System.Windows.Forms.Panel
@@ -612,15 +589,15 @@ try {
     $actions.Controls.AddRange(@($btnEnableCloud,$btnRevertOnPrem,$btnRefreshRow))
     $gridPanel.Controls.Add($actions,0,1)
 
-    # --- Footer ---
+    # Footer
     $footer = New-Object System.Windows.Forms.Label
     $footer.Dock = 'Fill'
     $footer.TextAlign = 'MiddleLeft'
     $footer.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0)
-    $footer.Text = "v$($Script:ScriptVersion) | Toggle mailbox SOA for Exchange attributes (IsExchangeCloudManaged) | Log: $($Script:LogFile)"
+    $footer.Text = "v$($Script:ScriptVersion) | Toggle mailbox SOA (IsExchangeCloudManaged) | Log: $($Script:LogFile)"
     $root.Controls.Add($footer,0,3)
 
-    # --- UI helper functions ---
+    # UI helpers
     function Update-PagingUI {
         $totalPages = Get-TotalPages -Items $Script:CurrentView -PageSize $Script:PageSize
         $totalItems = if ($Script:CurrentView) { $Script:CurrentView.Count } else { 0 }
@@ -642,12 +619,29 @@ try {
         $btnNext.Enabled = ($Script:PageIndex -lt ($totalPages - 1))
     }
 
+    function Set-GridData {
+        param([System.Data.DataTable]$DataTable)
+
+        # Force a reliable repaint/rebind:
+        $grid.SuspendLayout()
+        try {
+            $grid.DataSource = $null
+            $grid.AutoGenerateColumns = $true
+            $grid.DataSource = $DataTable
+            $grid.Refresh()
+
+            $dtRows = if ($DataTable) { $DataTable.Rows.Count } else { -1 }
+            $gRows  = $grid.Rows.Count
+            Write-Log "Grid bind diagnostics: DataTableRows=$dtRows GridRows=$gRows" "INFO"
+        } finally {
+            $grid.ResumeLayout()
+        }
+    }
+
     function Bind-GridFromCurrentView {
-        Ensure-GridBindingReady
         $pageItems = Get-PageSlice -Items $Script:CurrentView -PageIndex $Script:PageIndex -PageSize $Script:PageSize
         $dt = Convert-PageToDataTable -PageItems $pageItems
-        $Script:GridBinding.DataSource = $dt
-        if ($Script:GridBinding) { $Script:GridBinding.ResetBindings($true) }
+        Set-GridData -DataTable $dt
         Update-PagingUI
     }
 
@@ -669,9 +663,7 @@ try {
 
         if (-not $Connected) {
             $lblConn.Text = "Status: Not connected"
-            Ensure-GridBindingReady
-            $Script:GridBinding.DataSource = New-GridDataTable
-            $Script:GridBinding.ResetBindings($true)
+            Set-GridData -DataTable (New-GridDataTable)
             $lblStatus.Text = ""
             $lblPage.Text = "Page: -"
             $lblCount.Text = "Count: -"
@@ -686,10 +678,7 @@ try {
         }
     }
 
-    # -------------------------
-    # Events / Button handlers
-    # -------------------------
-
+    # Events
     $btnOpenLog.Add_Click({
         try {
             if (-not (Test-Path $Script:LogFile)) {
@@ -709,12 +698,8 @@ try {
     $btnConnect.Add_Click({
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
         try {
-            if (Connect-EXO) {
-                Set-UiConnectedState -Connected $true
-            }
-        } finally {
-            $form.Cursor = [System.Windows.Forms.Cursors]::Default
-        }
+            if (Connect-EXO) { Set-UiConnectedState -Connected $true }
+        } finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
     })
 
     $btnDisconnect.Add_Click({
@@ -722,9 +707,7 @@ try {
         try {
             Disconnect-EXO
             Set-UiConnectedState -Connected $false
-        } finally {
-            $form.Cursor = [System.Windows.Forms.Cursors]::Default
-        }
+        } finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
     })
 
     $cmbPageSize.Add_SelectedIndexChanged({
@@ -775,12 +758,13 @@ try {
             [System.Windows.Forms.Application]::DoEvents()
 
             Write-Log "LoadAll clicked." "INFO"
-
             $raw = Get-AllMailboxesSafe
             $cache = foreach ($m in $raw) { Convert-ToRow $m }
 
             $Script:MailboxCache = @($cache)
             $Script:CacheLoaded  = $true
+
+            Write-Log "Cache built. CachedCount=$($Script:MailboxCache.Count)" "INFO"
 
             Reset-ViewToCache
             Bind-GridFromCurrentView
@@ -789,7 +773,6 @@ try {
             $btnClear.Enabled = $true
             $lblStatus.Text = "Loaded"
             $lblCount.Text = "Count: $($Script:MailboxCache.Count)"
-            Write-Log "LoadAll success. CachedCount=$($Script:MailboxCache.Count)" "INFO"
         } catch {
             Write-LogException -ErrorRecord $_ -Context "LoadAll failed"
             $lblStatus.Text = "Load failed"
@@ -915,12 +898,7 @@ try {
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
         try {
             $msg = Set-MailboxSOACloudManaged -Identity $Script:SelectedIdentity -EnableCloudManaged $true
-            [System.Windows.Forms.MessageBox]::Show(
-                $msg,"Done",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Information
-            ) | Out-Null
-
+            [System.Windows.Forms.MessageBox]::Show($msg,"Done",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
             $btnRefreshRow.PerformClick()
         } catch {
             Write-LogException -ErrorRecord $_ -Context "Enable cloud SOA failed"
@@ -949,12 +927,7 @@ try {
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
         try {
             $msg = Set-MailboxSOACloudManaged -Identity $Script:SelectedIdentity -EnableCloudManaged $false
-            [System.Windows.Forms.MessageBox]::Show(
-                $msg,"Done",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Information
-            ) | Out-Null
-
+            [System.Windows.Forms.MessageBox]::Show($msg,"Done",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
             $btnRefreshRow.PerformClick()
         } catch {
             Write-LogException -ErrorRecord $_ -Context "Revert to on-prem SOA failed"
@@ -975,11 +948,9 @@ try {
         Write-Log "Application closed." "INFO"
     })
 
-    # Init UI state
+    # Init UI
     Set-UiConnectedState -Connected $false
-    Ensure-GridBindingReady
-    $Script:GridBinding.DataSource = New-GridDataTable
-    $Script:GridBinding.ResetBindings($true)
+    Set-GridData -DataTable (New-GridDataTable)
 
     Write-Log "GUI starting (Application.Run)..." "INFO"
     [System.Windows.Forms.Application]::Run($form)

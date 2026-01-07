@@ -8,6 +8,8 @@ It toggles whether Exchange attributes for a synced mailbox should be managed fr
 - **Exchange Online (Cloud-managed)** → *SOA = Online* (`IsExchangeCloudManaged = True`)
 - **Exchange On-Premises (On-prem managed)** → *SOA = On-Prem* (`IsExchangeCloudManaged = False`)
 
+It is done by converting the Mailbox State of Authority (SOA) of the mailbox. Can be done on individual mailboxes.
+
 Microsoft reference:
 - *Enable Exchange attributes in Microsoft Entra ID for cloud management* (Microsoft Learn)  
   https://learn.microsoft.com/en-us/exchange/hybrid-deployment/enable-exchange-attributes-cloud-management
@@ -22,6 +24,28 @@ This tool provides a safe GUI-based way to:
 - See which mailboxes are currently **cloud-managed** vs **on-prem managed**
 - Switch SOA state per mailbox quickly
 - Log all changes to a single logfile for auditing and troubleshooting
+
+---
+##Requirements
+
+### PowerShell
+- **PowerShell 7+** required (`pwsh.exe`)
+
+### STA mode (important for WinForms)
+WinForms requires **Single-Threaded Apartment (STA)** mode:
+
+### Exchange Online PowerShell module: ExchangeOnlineManagement
+Connectivity to Exchange Online endpoints
+Appropriate Exchange Online permissions to run Get-Mailbox and Set-Mailbox
+
+### Permissions / roles in Exchange Online & Microsoft 365
+At minimum, the signed-in admin account must be able to:
+- Run Get-Mailbox across the target scope
+- Run Set-Mailbox -IsExchangeCloudManaged ... on the target recipients
+
+Roles needed, one of the two:
+- Exchange Administrator
+- Global Administrator
 
 ---
 
@@ -78,13 +102,6 @@ Safety behavior:
 
 ---
 
-## Requirements
-
-### PowerShell
-- **PowerShell 7+** required (`pwsh.exe`)
-
-### STA mode (important for WinForms)
-WinForms requires **Single-Threaded Apartment (STA)** mode:
 
 ```powershell
 pwsh.exe -STA -ExecutionPolicy Bypass -File .\MailboxSOAManager-GUI.ps1
